@@ -52,7 +52,12 @@ type Instances struct {
 }
 
 const (
-	instanceShutoff = "SHUTOFF"
+	instanceShutoff     = "SHUTOFF"
+	IPv6InternalOrderID = "IPv6Internal"
+	IPv6ExternalOrderID = "IPv6External"
+	IPv4InternalOrderID = "IPv4Internal"
+	IPv4ExternalOrderID = "IPv4External"
+	HostnameOrderID     = "Hostname"
 )
 
 var _ cloudprovider.Instances = &Instances{}
@@ -561,7 +566,85 @@ func nodeAddresses(srv *servers.Server, interfaces []attachinterfaces.Interface,
 		}
 	}
 
+	if networkingOpts.PreferredAddressOrder != "" {
+		orderAllAddresses(&addrs, networkingOpts.PreferredAddressOrder)
+	}
+
 	return addrs, nil
+}
+
+// func isIPAdressType(addressType v1.NodeAddressType) bool {
+// 	return addressType == v1.NodeInternalIP || addressType == v1.NodeExternalIP
+// }
+
+func isIPv4(address string) bool {
+	return net.ParseIP(address).To4() != nil
+}
+
+func isIPv6(address string) bool {
+	return net.ParseIP(address).To4() == nil
+}
+
+func isInternalIP(addressType v1.NodeAddressType) bool {
+	return addressType == v1.NodeInternalIP
+}
+
+func isExternalIP(addressType v1.NodeAddressType) bool {
+	return addressType == v1.NodeExternalIP
+}
+
+func isInternalIPv4(address v1.NodeAddress) bool {
+	return isIPv4(address.Address) && isInternalIP(address.Type)
+}
+
+func isExternalIPv4(address v1.NodeAddress) bool {
+	return isIPv4(address.Address) && isExternalIP(address.Type)
+}
+
+func isInternalIPv6(address v1.NodeAddress) bool {
+	return isIPv6(address.Address) && isInternalIP(address.Type)
+}
+
+func isExternalIPv6(address v1.NodeAddress) bool {
+	return isIPv6(address.Address) && isExternalIP(address.Type)
+}
+
+func isHostname(address v1.NodeAddress) bool {
+	return address.Type == v1.NodeHostName
+}
+
+// orderAddresses will order the specific addresses according to the condition
+func orderAddresses(addresses *[]v1.NodeAddress, j *int, condition func(v1.NodeAddress) bool) {
+	for i := *j; i < len(*addresses); i++ {
+		address := (*addresses)[i]
+		if condition(address) {
+			(*addresses)[*j], (*addresses)[i] = (*addresses)[i], (*addresses)[*j]
+			*j++
+		}
+	}
+}
+
+// orderAllAddresses parses the preferredAddressOrder and brings the addresses of a node into the preferred order
+func orderAllAddresses(addresses *[]v1.NodeAddress, preferredAddressOrder string) {
+	j := 0
+	elements := strings.Split(preferredAddressOrder, ",")
+	for _, id := range elements {
+		id = strings.TrimSpace(id)
+		switch id {
+		case IPv4InternalOrderID:
+			orderAddresses(addresses, &j, isInternalIPv4)
+		case IPv4ExternalOrderID:
+			orderAddresses(addresses, &j, isExternalIPv4)
+		case IPv6InternalOrderID:
+			orderAddresses(addresses, &j, isInternalIPv6)
+		case IPv6ExternalOrderID:
+			orderAddresses(addresses, &j, isExternalIPv6)
+		case HostnameOrderID:
+			orderAddresses(addresses, &j, isHostname)
+		default:
+			klog.Warningf("%s is not a valid preferred address order option. Supported options are %s, %s, %s, %s, and %s", id, IPv4InternalOrderID, IPv4ExternalOrderID, IPv6InternalOrderID, IPv6ExternalOrderID, HostnameOrderID)
+		}
+	}
 }
 
 func getAddressesByName(client *gophercloud.ServiceClient, name types.NodeName, networkingOpts NetworkingOpts) ([]v1.NodeAddress, error) {

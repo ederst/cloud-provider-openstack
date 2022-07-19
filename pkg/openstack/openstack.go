@@ -115,9 +115,10 @@ type BlockStorageOpts struct {
 
 // NetworkingOpts is used for networking settings
 type NetworkingOpts struct {
-	IPv6SupportDisabled bool     `gcfg:"ipv6-support-disabled"`
-	PublicNetworkName   []string `gcfg:"public-network-name"`
-	InternalNetworkName []string `gcfg:"internal-network-name"`
+	IPv6SupportDisabled   bool     `gcfg:"ipv6-support-disabled"`
+	PreferredAddressOrder string   `gcfg:"preferred-address-order"`
+	PublicNetworkName     []string `gcfg:"public-network-name"`
+	InternalNetworkName   []string `gcfg:"internal-network-name"`
 }
 
 // RouterOpts is used for Neutron routes
