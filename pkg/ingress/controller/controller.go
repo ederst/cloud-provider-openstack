@@ -57,6 +57,7 @@ import (
 	"k8s.io/cloud-provider-openstack/pkg/ingress/config"
 	"k8s.io/cloud-provider-openstack/pkg/ingress/controller/openstack"
 	"k8s.io/cloud-provider-openstack/pkg/ingress/utils"
+	cpoerrors "k8s.io/cloud-provider-openstack/pkg/util/errors"
 	openstackutil "k8s.io/cloud-provider-openstack/pkg/util/openstack"
 )
 
@@ -456,7 +457,7 @@ func (c *Controller) nodeSyncLoop() {
 		lbName := utils.GetResourceName(ing.Namespace, ing.Name, c.config.ClusterName)
 		loadbalancer, err := openstackutil.GetLoadbalancerByName(c.osClient.Octavia, lbName)
 		if err != nil {
-			if err != openstackutil.ErrNotFound {
+			if err != cpoerrors.ErrNotFound {
 				log.WithFields(log.Fields{"name": lbName}).Errorf("Failed to retrieve loadbalancer from OpenStack: %v", err)
 			}
 
@@ -564,7 +565,7 @@ func (c *Controller) deleteIngress(ing *nwv1.Ingress) error {
 	// If load balancer doesn't exist, assume it's already deleted.
 	loadbalancer, err := openstackutil.GetLoadbalancerByName(c.osClient.Octavia, lbName)
 	if err != nil {
-		if err != openstackutil.ErrNotFound {
+		if err != cpoerrors.ErrNotFound {
 			return fmt.Errorf("error getting loadbalancer %s: %v", ing.Name, err)
 		}
 
@@ -1033,7 +1034,6 @@ func privateKeyFromPEM(pemData []byte) (crypto.PrivateKey, error) {
 
 // parsePEMBundle parses a certificate bundle from top to bottom and returns
 // a slice of x509 certificates. This function will error if no certificates are found.
-//
 func parsePEMBundle(bundle []byte) ([]*x509.Certificate, error) {
 	var certificates []*x509.Certificate
 	var certDERBlock *pem.Block

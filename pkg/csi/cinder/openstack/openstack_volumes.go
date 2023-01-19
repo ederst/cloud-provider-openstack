@@ -120,7 +120,9 @@ func (os *OpenStack) GetVolumesByName(n string) ([]volumes.Volume, error) {
 
 	// cinder filtering in volumes list is available since 3.34 microversion
 	// https://docs.openstack.org/cinder/latest/contributor/api_microversion_history.html#id32
-	blockstorageClient.Microversion = "3.34"
+	if !os.bsOpts.IgnoreVolumeMicroversion {
+		blockstorageClient.Microversion = "3.34"
+	}
 
 	opts := volumes.ListOpts{Name: n}
 	pages, err := volumes.List(blockstorageClient, opts).AllPages()
@@ -223,7 +225,7 @@ func (os *OpenStack) WaitDiskAttached(instanceID string, volumeID string) error 
 	return err
 }
 
-//WaitVolumeTargetStatus waits for volume to be in target state
+// WaitVolumeTargetStatus waits for volume to be in target state
 func (os *OpenStack) WaitVolumeTargetStatus(volumeID string, tStatus []string) error {
 	backoff := wait.Backoff{
 		Duration: operationFinishInitDelay,
@@ -339,6 +341,12 @@ func (os *OpenStack) ExpandVolume(volumeID string, status string, newSize int) e
 
 	switch status {
 	case VolumeInUseStatus:
+		// If the user has disabled the use of microversion to be compatibale with
+		// older clouds, we should fail early
+		if os.bsOpts.IgnoreVolumeMicroversion {
+			return fmt.Errorf("volume online resize is not available with ignore-volume-microversion, requires microversion 3.42 or newer")
+		}
+
 		// Init a local thread safe copy of the Cinder ServiceClient
 		blockstorageClient, err := openstack.NewBlockStorageV3(os.blockstorage.ProviderClient, os.epOpts)
 		if err != nil {
@@ -358,7 +366,7 @@ func (os *OpenStack) ExpandVolume(volumeID string, status string, newSize int) e
 	return fmt.Errorf("volume cannot be resized, when status is %s", status)
 }
 
-//GetMaxVolLimit returns max vol limit
+// GetMaxVolLimit returns max vol limit
 func (os *OpenStack) GetMaxVolLimit() int64 {
 	if os.bsOpts.NodeVolumeAttachLimit > 0 && os.bsOpts.NodeVolumeAttachLimit <= 256 {
 		return os.bsOpts.NodeVolumeAttachLimit

@@ -56,6 +56,9 @@ var userAgentData []string
 // supportedLBProvider map is used to define LoadBalancer providers that we support
 var supportedLBProvider = []string{"amphora", "octavia", "ovn"}
 
+// supportedContainerStore map is used to define supported tls-container-ref store
+var supportedContainerStore = []string{"barbican", "external"}
+
 // AddExtraFlags is called by the main package to add component specific command line flags
 func AddExtraFlags(fs *pflag.FlagSet) {
 	fs.StringArrayVar(&userAgentData, "user-agent", nil, "Extra data to add to gophercloud user-agent. Use multiple times to add more than one component.")
@@ -77,6 +80,7 @@ type LoadBalancerOpts struct {
 	LBVersion             string              `gcfg:"lb-version"`           // overrides autodetection. Only support v2.
 	UseOctavia            bool                `gcfg:"use-octavia"`          // uses Octavia V2 service catalog endpoint
 	SubnetID              string              `gcfg:"subnet-id"`            // overrides autodetection.
+	MemberSubnetID        string              `gcfg:"member-subnet-id"`     // overrides autodetection.
 	NetworkID             string              `gcfg:"network-id"`           // If specified, will create virtual ip from a subnet in network which has available IP addresses
 	FloatingNetworkID     string              `gcfg:"floating-network-id"`  // If specified, will create floating ip for loadbalancer, or do not create floating ip.
 	FloatingSubnetID      string              `gcfg:"floating-subnet-id"`   // If specified, will create floating ip for loadbalancer in this particular floating pool subnetwork.
@@ -98,6 +102,7 @@ type LoadBalancerOpts struct {
 	EnableIngressHostname bool                `gcfg:"enable-ingress-hostname"` // Used with proxy protocol by adding a dns suffix to the load balancer IP address. Default false.
 	IngressHostnameSuffix string              `gcfg:"ingress-hostname-suffix"` // Used with proxy protocol by adding a dns suffix to the load balancer IP address. Default nip.io.
 	MaxSharedLB           int                 `gcfg:"max-shared-lb"`           //  Number of Services in maximum can share a single load balancer. Default 2
+	ContainerStore        string              `gcfg:"container-store"`         // Used to specify the store of the tls-container-ref
 	// revive:disable:var-naming
 	TlsContainerRef string `gcfg:"default-tls-container-ref"` //  reference to a tls container
 	// revive:enable:var-naming
@@ -111,6 +116,7 @@ type LBClass struct {
 	FloatingSubnetTags string `gcfg:"floating-subnet-tags,omitempty"`
 	NetworkID          string `gcfg:"network-id,omitempty"`
 	SubnetID           string `gcfg:"subnet-id,omitempty"`
+	MemberSubnetID     string `gcfg:"member-subnet-id,omitempty"`
 }
 
 // NetworkingOpts is used for networking settings
@@ -118,6 +124,7 @@ type NetworkingOpts struct {
 	IPv6SupportDisabled bool     `gcfg:"ipv6-support-disabled"`
 	PublicNetworkName   []string `gcfg:"public-network-name"`
 	InternalNetworkName []string `gcfg:"internal-network-name"`
+	AddressSortOrder    string   `gcfg:"address-sort-order"`
 }
 
 // RouterOpts is used for Neutron routes
@@ -198,6 +205,7 @@ func ReadConfig(config io.Reader) (Config, error) {
 	cfg.LoadBalancer.EnableIngressHostname = false
 	cfg.LoadBalancer.IngressHostnameSuffix = defaultProxyHostnameSuffix
 	cfg.LoadBalancer.TlsContainerRef = ""
+	cfg.LoadBalancer.ContainerStore = "barbican"
 	cfg.LoadBalancer.MaxSharedLB = 2
 
 	err := gcfg.FatalOnly(gcfg.ReadInto(&cfg, config))
@@ -226,6 +234,10 @@ func ReadConfig(config io.Reader) (Config, error) {
 
 	if !util.Contains(supportedLBProvider, cfg.LoadBalancer.LBProvider) {
 		klog.Warningf("Unsupported LoadBalancer Provider: %s", cfg.LoadBalancer.LBProvider)
+	}
+
+	if !util.Contains(supportedContainerStore, cfg.LoadBalancer.ContainerStore) {
+		klog.Warningf("Unsupported Container Store: %s", cfg.LoadBalancer.ContainerStore)
 	}
 
 	return cfg, err
@@ -365,7 +377,7 @@ func (os *OpenStack) GetZone(ctx context.Context) (cloudprovider.Zone, error) {
 // This is particularly useful in external cloud providers where the kubelet
 // does not initialize node data.
 func (os *OpenStack) GetZoneByProviderID(ctx context.Context, providerID string) (cloudprovider.Zone, error) {
-	instanceID, err := instanceIDFromProviderID(providerID)
+	instanceID, _, err := instanceIDFromProviderID(providerID)
 	if err != nil {
 		return cloudprovider.Zone{}, err
 	}

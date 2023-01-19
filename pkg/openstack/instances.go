@@ -17,10 +17,11 @@ limitations under the License.
 package openstack
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
+	sysos "os"
 	"regexp"
 	"sort"
 	"strings"
@@ -46,16 +47,88 @@ import (
 
 // Instances encapsulates an implementation of Instances for OpenStack.
 type Instances struct {
-	compute        *gophercloud.ServiceClient
-	opts           metadata.Opts
-	networkingOpts NetworkingOpts
+	compute          *gophercloud.ServiceClient
+	region           string
+	regionProviderID bool
+	opts             metadata.Opts
+	networkingOpts   NetworkingOpts
 }
 
 const (
-	instanceShutoff = "SHUTOFF"
+	instanceShutoff       = "SHUTOFF"
+	RegionalProviderIDEnv = "OS_CCM_REGIONAL"
+	noSortPriority        = 0
 )
 
 var _ cloudprovider.Instances = &Instances{}
+
+// buildAddressSortOrderList builds a list containing only valid CIDRs based on the content of addressSortOrder.
+//
+// It will ignore and warn about invalid sort order items.
+func buildAddressSortOrderList(addressSortOrder string) []*net.IPNet {
+	var list []*net.IPNet
+	for _, item := range strings.Split(addressSortOrder, ",") {
+		item = strings.TrimSpace(item)
+
+		_, cidr, err := net.ParseCIDR(item)
+		if err != nil {
+			klog.Warningf("Ignoring invalid sort order item '%s': %v.", item, err)
+			continue
+		}
+
+		list = append(list, cidr)
+	}
+
+	return list
+}
+
+// getSortPriority returns the priority as int of an address.
+//
+// The priority depends on the index of the CIDR in the list the address is matching,
+// where the first item of the list has higher priority than the last.
+//
+// If the address does not match any CIDR or is not an IP address the function returns noSortPriority.
+func getSortPriority(list []*net.IPNet, address string) int {
+	parsedAddress := net.ParseIP(address)
+	if parsedAddress == nil {
+		return noSortPriority
+	}
+
+	for i, cidr := range list {
+		if cidr.Contains(parsedAddress) {
+			fmt.Println(i, cidr, len(list)-i)
+			return len(list) - i
+		}
+	}
+
+	return noSortPriority
+}
+
+// sortNodeAddresses sorts node addresses based on comma separated list of CIDRs represented by addressSortOrder.
+//
+// The function only sorts addresses which match the CIDR and leaves the other addresses in the same order they are in.
+// Essentially, it will also group the addresses matching a CIDR together and sort them ascending in this group,
+// whereas the inter-group sorting depends on the priority.
+//
+// The priority depends on the order of the item in addressSortOrder, where the first item has higher priority than the last.
+func sortNodeAddresses(addresses []v1.NodeAddress, addressSortOrder string) {
+	list := buildAddressSortOrderList(addressSortOrder)
+
+	sort.SliceStable(addresses, func(i int, j int) bool {
+		addressLeft := addresses[i]
+		addressRight := addresses[j]
+
+		priorityLeft := getSortPriority(list, addressLeft.Address)
+		priorityRight := getSortPriority(list, addressRight.Address)
+
+		// ignore priorities of value 0 since this means the address has noSortPriority and we need to sort by priority
+		if priorityLeft > noSortPriority && priorityLeft == priorityRight {
+			return bytes.Compare(net.ParseIP(addressLeft.Address), net.ParseIP(addressRight.Address)) < 0
+		}
+
+		return priorityLeft > priorityRight
+	})
+}
 
 // Instances returns an implementation of Instances for OpenStack.
 func (os *OpenStack) Instances() (cloudprovider.Instances, bool) {
@@ -77,10 +150,17 @@ func (os *OpenStack) instances() (*Instances, bool) {
 		return nil, false
 	}
 
+	regionalProviderID := false
+	if isRegionalProviderID := sysos.Getenv(RegionalProviderIDEnv); isRegionalProviderID == "true" {
+		regionalProviderID = true
+	}
+
 	return &Instances{
-		compute:        compute,
-		opts:           os.metadataOpts,
-		networkingOpts: os.networkingOpts,
+		compute:          compute,
+		region:           os.epOpts.Region,
+		regionProviderID: regionalProviderID,
+		opts:             os.metadataOpts,
+		networkingOpts:   os.networkingOpts,
 	}, true
 }
 
@@ -128,12 +208,17 @@ func (i *Instances) NodeAddresses(ctx context.Context, name types.NodeName) ([]v
 // This method will not be called from the node that is requesting this ID. i.e. metadata service
 // and other local methods cannot be used here
 func (i *Instances) NodeAddressesByProviderID(ctx context.Context, providerID string) ([]v1.NodeAddress, error) {
-	klog.V(4).Infof("NodeAddressesByProviderID (%v) called", providerID)
+	klog.V(4).Infof("NodeAddressesByProviderID(%v) called", providerID)
 
-	instanceID, err := instanceIDFromProviderID(providerID)
-
+	instanceID, instanceRegion, err := instanceIDFromProviderID(providerID)
 	if err != nil {
 		return []v1.NodeAddress{}, err
+	}
+
+	if instanceRegion != "" && instanceRegion != i.region {
+		klog.V(4).Infof("NodeAddressesByProviderID(%v) has foreign region %v, skipped", providerID, instanceRegion)
+
+		return []v1.NodeAddress{}, nil
 	}
 
 	mc := metrics.NewMetricContext("server", "get")
@@ -162,10 +247,16 @@ func (i *Instances) InstanceExists(ctx context.Context, node *v1.Node) (bool, er
 	return i.InstanceExistsByProviderID(ctx, node.Spec.ProviderID)
 }
 
-func instanceExistsByProviderID(ctx context.Context, compute *gophercloud.ServiceClient, providerID string) (bool, error) {
-	instanceID, err := instanceIDFromProviderID(providerID)
+func instanceExistsByProviderID(ctx context.Context, compute *gophercloud.ServiceClient, providerID string, region string) (bool, error) {
+	instanceID, instanceRegion, err := instanceIDFromProviderID(providerID)
 	if err != nil {
 		return false, err
+	}
+
+	if instanceRegion != "" && instanceRegion != region {
+		klog.V(4).Infof("instanceExistsByProviderID(%v) has foreign region %v, skipped", providerID, instanceRegion)
+
+		return true, nil
 	}
 
 	mc := metrics.NewMetricContext("server", "get")
@@ -183,7 +274,7 @@ func instanceExistsByProviderID(ctx context.Context, compute *gophercloud.Servic
 // InstanceExistsByProviderID returns true if the instance with the given provider id still exists.
 // If false is returned with no error, the instance will be immediately deleted by the cloud controller manager.
 func (i *Instances) InstanceExistsByProviderID(ctx context.Context, providerID string) (bool, error) {
-	return instanceExistsByProviderID(ctx, i.compute, providerID)
+	return instanceExistsByProviderID(ctx, i.compute, providerID, i.region)
 }
 
 // InstanceShutdown returns true if the instances is in safe state to detach volumes.
@@ -192,10 +283,14 @@ func (i *Instances) InstanceShutdown(ctx context.Context, node *v1.Node) (bool, 
 	return i.InstanceShutdownByProviderID(ctx, node.Spec.ProviderID)
 }
 
-func instanceShutdownByProviderID(ctx context.Context, compute *gophercloud.ServiceClient, providerID string) (bool, error) {
-	instanceID, err := instanceIDFromProviderID(providerID)
+func instanceShutdownByProviderID(ctx context.Context, compute *gophercloud.ServiceClient, providerID string, region string) (bool, error) {
+	instanceID, instanceRegion, err := instanceIDFromProviderID(providerID)
 	if err != nil {
 		return false, err
+	}
+
+	if instanceRegion != "" && instanceRegion != region {
+		return false, fmt.Errorf("ProviderID \"%s\" didn't match supported region \"%s\"", providerID, region)
 	}
 
 	mc := metrics.NewMetricContext("server", "get")
@@ -214,14 +309,18 @@ func instanceShutdownByProviderID(ctx context.Context, compute *gophercloud.Serv
 // InstanceShutdownByProviderID returns true if the instances is in safe state to detach volumes.
 // It is the only state, where volumes can be detached immediately.
 func (i *Instances) InstanceShutdownByProviderID(ctx context.Context, providerID string) (bool, error) {
-	return instanceShutdownByProviderID(ctx, i.compute, providerID)
+	return instanceShutdownByProviderID(ctx, i.compute, providerID, i.region)
 }
 
 // InstanceMetadata returns metadata of the specified instance.
 func (i *Instances) InstanceMetadata(ctx context.Context, node *v1.Node) (*cloudprovider.InstanceMetadata, error) {
-	instanceID, err := instanceIDFromProviderID(node.Spec.ProviderID)
+	instanceID, instanceRegion, err := instanceIDFromProviderID(node.Spec.ProviderID)
 	if err != nil {
 		return nil, err
+	}
+
+	if instanceRegion != "" && instanceRegion != i.region {
+		return nil, fmt.Errorf("ProviderID \"%s\" didn't match supported region \"%s\"", node.Spec.ProviderID, i.region)
 	}
 
 	mc := metrics.NewMetricContext("server", "get")
@@ -260,6 +359,11 @@ func (i *Instances) InstanceID(ctx context.Context, name types.NodeName) (string
 		}
 		return "", err
 	}
+
+	if i.regionProviderID {
+		return i.region + "/" + srv.ID, nil
+	}
+
 	// In the future it is possible to also return an endpoint as:
 	// <endpoint>/<instanceid>
 	return "/" + srv.ID, nil
@@ -269,10 +373,13 @@ func (i *Instances) InstanceID(ctx context.Context, name types.NodeName) (string
 // This method will not be called from the node that is requesting this ID. i.e. metadata service
 // and other local methods cannot be used here
 func (i *Instances) InstanceTypeByProviderID(ctx context.Context, providerID string) (string, error) {
-	instanceID, err := instanceIDFromProviderID(providerID)
-
+	instanceID, instanceRegion, err := instanceIDFromProviderID(providerID)
 	if err != nil {
 		return "", err
+	}
+
+	if instanceRegion != "" && instanceRegion != i.region {
+		return "", fmt.Errorf("ProviderID \"%s\" didn't match supported region \"%s\"", providerID, i.region)
 	}
 
 	mc := metrics.NewMetricContext("server", "get")
@@ -335,12 +442,13 @@ func isValidLabelValue(v string) bool {
 }
 
 // If Instances.InstanceID or cloudprovider.GetInstanceProviderID is changed, the regexp should be changed too.
-var providerIDRegexp = regexp.MustCompile(`^` + ProviderName + `:///([^/]+)$`)
+var providerIDRegexp = regexp.MustCompile(`^` + ProviderName + `://([^/]*)/([^/]+)$`)
 
 // instanceIDFromProviderID splits a provider's id and return instanceID.
-// A providerID is build out of '${ProviderName}:///${instance-id}'which contains ':///'.
+// A providerID is build out of '${ProviderName}:///${instance-id}' which contains ':///'.
+// or '${ProviderName}://${region}/${instance-id}' which contains '://'.
 // See cloudprovider.GetInstanceProviderID and Instances.InstanceID.
-func instanceIDFromProviderID(providerID string) (instanceID string, err error) {
+func instanceIDFromProviderID(providerID string) (instanceID string, region string, err error) {
 
 	// https://github.com/kubernetes/kubernetes/issues/85731
 	if providerID != "" && !strings.Contains(providerID, "://") {
@@ -348,10 +456,10 @@ func instanceIDFromProviderID(providerID string) (instanceID string, err error) 
 	}
 
 	matches := providerIDRegexp.FindStringSubmatch(providerID)
-	if len(matches) != 2 {
-		return "", fmt.Errorf("ProviderID \"%s\" didn't match expected format \"openstack:///InstanceID\"", providerID)
+	if len(matches) != 3 {
+		return "", "", fmt.Errorf("ProviderID \"%s\" didn't match expected format \"openstack://region/InstanceID\"", providerID)
 	}
-	return matches[1], nil
+	return matches[2], matches[1], nil
 }
 
 // AddToNodeAddresses appends the NodeAddresses to the passed-by-pointer slice,
@@ -414,7 +522,7 @@ func readInstanceID(searchOrder string) (string, error) {
 
 	// Try to find instance ID on the local filesystem (created by cloud-init)
 	const instanceIDFile = "/var/lib/cloud/data/instance-id"
-	idBytes, err := ioutil.ReadFile(instanceIDFile)
+	idBytes, err := sysos.ReadFile(instanceIDFile)
 	if err == nil {
 		instanceID := string(idBytes)
 		instanceID = strings.TrimSpace(instanceID)
@@ -568,6 +676,10 @@ func nodeAddresses(srv *servers.Server, interfaces []attachinterfaces.Interface,
 				)
 			}
 		}
+	}
+
+	if networkingOpts.AddressSortOrder != "" {
+		sortNodeAddresses(addrs, networkingOpts.AddressSortOrder)
 	}
 
 	return addrs, nil

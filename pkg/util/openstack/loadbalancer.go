@@ -17,7 +17,6 @@ limitations under the License.
 package openstack
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -43,6 +42,7 @@ const (
 	OctaviaFeatureFlavors           = 2
 	OctaviaFeatureTimeout           = 3
 	OctaviaFeatureAvailabilityZones = 4
+	OctaviaFeatureHTTPMonitorsOnUDP = 5
 
 	waitLoadbalancerInitDelay   = 1 * time.Second
 	waitLoadbalancerFactor      = 1.2
@@ -56,11 +56,15 @@ const (
 var (
 	octaviaVersion string
 
-	// ErrNotFound is used to inform that the object is missing
-	ErrNotFound = errors.New("failed to find object")
+	// ErrNotFound is used to inform that the object is missing.
+	// Deprecated: use cpoerrors.ErrNotFound instead.
+	// TODO: remove in v1.27.0.
+	ErrNotFound = cpoerrors.ErrNotFound
 
-	// ErrMultipleResults is used when we unexpectedly get back multiple results
-	ErrMultipleResults = errors.New("multiple results where only one expected")
+	// ErrMultipleResults is used when we unexpectedly get back multiple results.
+	// Deprecated: use cpoerrors.ErrMultipleResults instead.
+	// TODO: remove in v1.27.0.
+	ErrMultipleResults = cpoerrors.ErrMultipleResults
 )
 
 // getOctaviaVersion returns the current Octavia API version.
@@ -138,6 +142,14 @@ func IsOctaviaFeatureSupported(client *gophercloud.ServiceClient, feature int, l
 		}
 		verAvailabilityZones, _ := version.NewVersion("v2.14")
 		if currentVer.GreaterThanOrEqual(verAvailabilityZones) {
+			return true
+		}
+	case OctaviaFeatureHTTPMonitorsOnUDP:
+		if lbProvider == "ovn" {
+			return false
+		}
+		verHTTPMonitorsOnUDP, _ := version.NewVersion("v2.16")
+		if currentVer.GreaterThanOrEqual(verHTTPMonitorsOnUDP) {
 			return true
 		}
 	default:
@@ -221,10 +233,10 @@ func GetLoadbalancerByName(client *gophercloud.ServiceClient, name string) (*loa
 	}
 
 	if len(loadbalancerList) > 1 {
-		return nil, ErrMultipleResults
+		return nil, cpoerrors.ErrMultipleResults
 	}
 	if len(loadbalancerList) == 0 {
-		return nil, ErrNotFound
+		return nil, cpoerrors.ErrNotFound
 	}
 
 	return &loadbalancerList[0], nil
@@ -364,19 +376,19 @@ func GetListenerByName(client *gophercloud.ServiceClient, name string, lbID stri
 		}
 		listenerList = append(listenerList, v...)
 		if len(listenerList) > 1 {
-			return false, ErrMultipleResults
+			return false, cpoerrors.ErrMultipleResults
 		}
 		return true, nil
 	})
 	if mc.ObserveRequest(err) != nil {
 		if cpoerrors.IsNotFound(err) {
-			return nil, ErrNotFound
+			return nil, cpoerrors.ErrNotFound
 		}
 		return nil, err
 	}
 
 	if len(listenerList) == 0 {
-		return nil, ErrNotFound
+		return nil, cpoerrors.ErrNotFound
 	}
 
 	return &listenerList[0], nil
@@ -430,21 +442,21 @@ func GetPoolByName(client *gophercloud.ServiceClient, name string, lbID string) 
 		}
 		listenerPools = append(listenerPools, v...)
 		if len(listenerPools) > 1 {
-			return false, ErrMultipleResults
+			return false, cpoerrors.ErrMultipleResults
 		}
 		return true, nil
 	})
 	if mc.ObserveRequest(err) != nil {
 		if cpoerrors.IsNotFound(err) {
-			return nil, ErrNotFound
+			return nil, cpoerrors.ErrNotFound
 		}
 		return nil, err
 	}
 
 	if len(listenerPools) == 0 {
-		return nil, ErrNotFound
+		return nil, cpoerrors.ErrNotFound
 	} else if len(listenerPools) > 1 {
-		return nil, ErrMultipleResults
+		return nil, cpoerrors.ErrMultipleResults
 	}
 
 	return &listenerPools[0], nil
@@ -468,19 +480,19 @@ func GetPoolByListener(client *gophercloud.ServiceClient, lbID, listenerID strin
 			}
 		}
 		if len(listenerPools) > 1 {
-			return false, ErrMultipleResults
+			return false, cpoerrors.ErrMultipleResults
 		}
 		return true, nil
 	})
 	if mc.ObserveRequest(err) != nil {
 		if cpoerrors.IsNotFound(err) {
-			return nil, ErrNotFound
+			return nil, cpoerrors.ErrNotFound
 		}
 		return nil, err
 	}
 
 	if len(listenerPools) == 0 {
-		return nil, ErrNotFound
+		return nil, cpoerrors.ErrNotFound
 	}
 
 	return &listenerPools[0], nil

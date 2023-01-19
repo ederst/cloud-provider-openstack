@@ -108,11 +108,15 @@ Request Body:
 
 - `loadbalancer.openstack.org/class`
 
-  The name of a preconfigured class in the config file. If provided, this config options included in the class section take precedence over the annotations of floating-subnet-id and floating-network-id. See the section below for how it works.
+  The name of a preconfigured class in the config file. If provided, this config options included in the class section take precedence over the annotations of floating-subnet-id, floating-network-id, network-id, subnet-id and member-subnet-id . See the section below for how it works.
 
 - `loadbalancer.openstack.org/subnet-id`
 
   VIP subnet ID of load balancer created.
+
+- `loadbalancer.openstack.org/member-subnet-id`
+
+  Member subnet ID of the load balancer created.
 
 - `loadbalancer.openstack.org/network-id`
 
@@ -207,15 +211,21 @@ Request Body:
   Reference to a tls container. This option works with Octavia, when this option is set then the cloud provider will create an Octavia Listener of type `TERMINATED_HTTPS` for a TLS Terminated loadbalancer.
   Format for tls container ref: `https://{keymanager_host}/v1/containers/{uuid}`
 
+  When `container-store` parameter is set to `external` format for `default-tls-container-ref` could be any string.
+
   Not supported when `lb-provider=ovn` is configured in openstack-cloud-controller-manager.
 
 - `loadbalancer.openstack.org/load-balancer-id`
 
-  This annotation is automatically added to the Service if it's not specified when creating. After the Service is created successfully it shouldn't be changed, otherwise the Service won't behave as expected.  
+  This annotation is automatically added to the Service if it's not specified when creating. After the Service is created successfully it shouldn't be changed, otherwise the Service won't behave as expected.
 
   If this annotation is specified with a valid cloud load balancer ID when creating Service, the Service is reusing this load balancer rather than creating another one. Again, it shouldn't be changed after the Service is created.
 
   If this annotation is specified, the other annotations which define the load balancer features will be ignored.
+
+- `loadbalancer.openstack.org/hostname`
+
+  This annotations explicitly sets a hostname in the status of the load balancer service.
 
 ### Switching between Floating Subnets by using preconfigured Classes
 
@@ -337,7 +347,7 @@ This requires that not only the proxy server(e.g. NGINX) should support PROXY pr
 
 This guide uses nginx-ingress-controller as an example.
 
-To enable PROXY protocol support, the openstack-cloud-controller-manager config option [enable-ingress-hostname](./using-openstack-cloud-controller-manager.md#load-balancer) should set to `true`.
+To enable PROXY protocol support, the either the openstack-cloud-controller-manager config option [enable-ingress-hostname](./using-openstack-cloud-controller-manager.md#load-balancer) should set to `true` or an explicit hostname should be set on the load balancer service via [annotation](./expose-applications-using-loadbalancer-type-service.md#service-annotations) `loadbalancer.openstack.org/hostname`.
 
 1. Set up the nginx-ingress-controller
 
@@ -413,9 +423,9 @@ To enable PROXY protocol support, the openstack-cloud-controller-manager config 
            ports:
              - containerPort: 8080
    EOF
-   
+
    $ kubectl expose deployment echoserver --type=ClusterIP --target-port=8080
-   
+
    $ cat <<EOF | kubectl apply -f -
    apiVersion: networking.k8s.io/v1
    kind: Ingress
@@ -437,7 +447,7 @@ To enable PROXY protocol support, the openstack-cloud-controller-manager config 
                  port:
                    number: 80
    EOF
-   
+
    $ kubectl get ing
    NAME                   CLASS    HOSTS      ADDRESS                 PORTS   AGE
    test-proxy-protocol    <none>   test.com   103.250.240.24.nip.io   80      58m
@@ -580,7 +590,7 @@ $ openstack loadbalancer listener list --loadbalancer 2b224530-9414-4302-8163-5a
 +--------------------------------------+----------+---------------+
 ```
 
-The load balancer will be deleted after `service-2` is deleted. 
+The load balancer will be deleted after `service-2` is deleted.
 
 ### IPv4 / IPv6 dual-stack services
 Since Kubernetes 1.20, Kubernetes clusters can run in dual-stack mode,
